@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
+import copy
+import dataclasses
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -13,7 +15,7 @@ from vllm_omni.config.config_factory import StageConfigFactory
 from vllm_omni.config.omni_config import VllmOmniDiffusionStageConfig, extract_diffusion_stage_config_kwargs
 from vllm_omni.config.resolver import OmniConfigResolution, resolve_omni_config
 from vllm_omni.config.stage_config import build_stage_runtime_overrides
-from vllm_omni.diffusion.data import AttentionConfig, OmniDiffusionConfig
+from vllm_omni.diffusion.data import AttentionConfig, DiffusionParallelConfig, OmniDiffusionConfig
 from vllm_omni.engine import stage_init_utils
 from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
 from vllm_omni.entrypoints.cli.serve import OmniServeCommand
@@ -814,6 +816,104 @@ def test_serve_cli_accepts_additional_config(subcommand_dest):
 
     assert args.additional_config == {"torchair_graph_config": {"enabled": True}}
     assert engine_args["additional_config"] == {"torchair_graph_config": {"enabled": True}}
+
+
+def _build_serve_diffusion_config(monkeypatch, tmp_path, *cli_args: str) -> OmniDiffusionConfig:
+    from vllm_omni.config.yaml_util import create_config
+
+    parser = TrackingArgumentParser()
+    subparsers = parser.add_subparsers(dest="subparser")
+    OmniServeCommand().subparser_init(subparsers)
+    args = parser.parse_args(["serve", str(tmp_path), "--omni", *cli_args])
+    stage_cfg = create_config(StageConfigFactory.create_default_diffusion(args.get_explicit_kwargs_dict())[0])
+    metadata = SimpleNamespace(stage_id=0, cfg_kv_collect_func=None, default_sampling_params=None)
+    monkeypatch.setattr(stage_init_utils.current_omni_platform, "get_device_count", lambda: 8)
+    return stage_init_utils.build_diffusion_config(str(tmp_path), stage_cfg, metadata)
+
+
+def test_additional_config_diffusion_fields_warn_and_stay_unapplied(monkeypatch, tmp_path, mocker):
+    """#5639: additional_config does not overlay diffusion fields, so warn with the dedicated flag."""
+    warn_once = mocker.patch.object(stage_init_utils.logger, "warning_once")
+    additional_config = {"vae_use_tiling": True, "parallel_config": {"vae_patch_parallel_size": 8}}
+
+    config = _build_serve_diffusion_config(monkeypatch, tmp_path, "--additional-config", json.dumps(additional_config))
+
+    assert config.parallel_config.vae_patch_parallel_size == 1
+    assert config.vae_use_tiling is False
+    assert {key: config.additional_config[key] for key in additional_config} == additional_config
+    warn_once.assert_called_once()
+    message = warn_once.call_args.args[0] % warn_once.call_args.args[1:]
+    assert "parallel_config.vae_patch_parallel_size (use --vae-patch-parallel-size)" in message
+    assert "vae_use_tiling (use --vae-use-tiling)" in message
+    assert "ignored for Omni" in message
+    assert "forwarded to the platform plugin and model-specific options" in message
+
+
+def test_dedicated_vae_flags_set_diffusion_fields_without_warning(monkeypatch, tmp_path, mocker):
+    warn_once = mocker.patch.object(stage_init_utils.logger, "warning_once")
+
+    config = _build_serve_diffusion_config(monkeypatch, tmp_path, "--vae-patch-parallel-size", "8", "--vae-use-tiling")
+
+    assert config.parallel_config.vae_patch_parallel_size == 8
+    assert config.vae_use_tiling is True
+    warn_once.assert_not_called()
+
+
+def test_additional_config_top_level_field_without_mapped_flag_warns(mocker):
+    warn_once = mocker.patch.object(stage_init_utils.logger, "warning_once")
+
+    stage_init_utils.warn_ignored_diffusion_additional_config({"flow_shift": 5.0, "torchair_graph_config": {}})
+
+    warn_once.assert_called_once()
+    assert warn_once.call_args.args[1] == "flow_shift (use its Omni engine option or --deploy-config)"
+
+
+# Keys that pipelines or the platform plugin read from additional_config.
+_CONSUMED_ADDITIONAL_CONFIG_KEYS = {
+    "vae_tile_parallel": False,
+    "lightvae_decoder_path": "/tmp/decoder.safetensors",
+    "video_vae_decoder": "/tmp/decoder.safetensors",
+    "latent_cache_clips": 2,
+    "min_generation_area": 1024,
+    "variant": "base",
+    "batch_cfg": True,
+    "cosmos3_mixed_precision": {"enabled": False},
+    "ltx2_audio_limits": {},
+    "omnivoice_asr": {},
+    "magi2_deterministic": True,
+    "model_type": "avatar-v1.5",
+    "resolution": "480p",
+    "npu_vae_tile_graph": False,
+    "diffusion_kv_profile_height": 512,
+    "weight_sharing_bootstrap": {},
+    "torchair_graph_config": {"enabled": True},
+    "parallel_config": {"plugin_only_key": 1},
+}
+
+
+def test_consumed_additional_config_keys_do_not_warn(mocker):
+    warn_once = mocker.patch.object(stage_init_utils.logger, "warning_once")
+    additional_config = copy.deepcopy(_CONSUMED_ADDITIONAL_CONFIG_KEYS)
+
+    stage_init_utils.warn_ignored_diffusion_additional_config(additional_config)
+
+    warn_once.assert_not_called()
+    assert additional_config == _CONSUMED_ADDITIONAL_CONFIG_KEYS
+
+
+def test_ignored_diffusion_field_hints_name_real_serve_flags():
+    """Every hinted flag is a serve option that sets the field it names."""
+    diffusion_fields = {
+        f.name for config_cls in (OmniDiffusionConfig, DiffusionParallelConfig) for f in dataclasses.fields(config_cls)
+    }
+    parser = TrackingArgumentParser()
+    subparsers = parser.add_subparsers(dest="subparser")
+    serve_parser = OmniServeCommand().subparser_init(subparsers)
+    flag_dests = {option: action.dest for action in serve_parser._actions for option in action.option_strings}
+
+    for name, flag in stage_init_utils._DIFFUSION_FIELD_CLI_FLAGS.items():
+        assert name in diffusion_fields
+        assert flag_dests.get(flag) == name
 
 
 def test_resolve_stage_configs_delegates_overrides_to_resolver(mocker):

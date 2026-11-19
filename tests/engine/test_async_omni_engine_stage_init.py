@@ -87,7 +87,9 @@ def test_build_ray_diffusion_config_preserves_explicit_stage_env(monkeypatch, ty
         runtime_cfg=runtime_cfg, stage_id=1, cfg_kv_collect_func=None, default_sampling_params=None
     )
     config = types.SimpleNamespace(
-        distributed_executor_backend="ray", parallel_config=types.SimpleNamespace(world_size=2)
+        distributed_executor_backend="ray",
+        parallel_config=types.SimpleNamespace(world_size=2),
+        additional_config={},
     )
     monkeypatch.setattr(init_mod, "build_engine_args_dict", lambda *args: {})
     monkeypatch.setattr(init_mod, "OmniDiffusionConfig", lambda **kwargs: config)
