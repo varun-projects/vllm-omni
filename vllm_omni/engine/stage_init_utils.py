@@ -54,7 +54,7 @@ from vllm_omni.config.omni_config import (
 )
 from vllm_omni.config.stage_config import StageType
 from vllm_omni.config.watermarking import WatermarkConfig
-from vllm_omni.diffusion.data import OmniDiffusionConfig
+from vllm_omni.diffusion.data import DiffusionParallelConfig, OmniDiffusionConfig
 from vllm_omni.distributed.omni_connectors.utils.config import (
     TRANSFER_ENGINE_CONNECTOR_NAMES,
 )
@@ -2084,6 +2084,69 @@ def get_stage_connector_spec(
     return {}
 
 
+# Dedicated ``vllm serve --omni`` options for diffusion fields users commonly
+# try to set through ``additional_config`` (#5639).
+_DIFFUSION_FIELD_CLI_FLAGS: dict[str, str] = {
+    "tensor_parallel_size": "--tensor-parallel-size",
+    "ulysses_degree": "--ulysses-degree",
+    "ulysses_mode": "--ulysses-mode",
+    "ulysses_a2a_permute": "--ulysses-a2a-permute",
+    "ring_degree": "--ring-degree",
+    "allgather_degree": "--allgather-degree",
+    "cfg_parallel_size": "--cfg-parallel-size",
+    "vae_patch_parallel_size": "--vae-patch-parallel-size",
+    "vae_parallel_mode": "--vae-parallel-mode",
+    "text_encoder_tp_size": "--text-encoder-tp-size",
+    "use_hsdp": "--use-hsdp",
+    "hsdp_shard_size": "--hsdp-shard-size",
+    "hsdp_replicate_size": "--hsdp-replicate-size",
+    "vae_use_tiling": "--vae-use-tiling",
+    "vae_use_slicing": "--vae-use-slicing",
+}
+
+
+def _init_field_names(config_cls: type) -> frozenset[str]:
+    return frozenset(config_field.name for config_field in fields(config_cls) if config_field.init)
+
+
+def warn_ignored_diffusion_additional_config(additional_config: Mapping[str, Any]) -> None:
+    """Warn about ``additional_config`` keys that name Omni diffusion fields.
+
+    ``additional_config`` (for example ``--additional-config``) is forwarded
+    unchanged to ``VllmConfig.additional_config`` for the platform plugin and
+    to the model-specific keys some pipelines read. It is not an overlay for
+    ``OmniDiffusionConfig`` or ``DiffusionParallelConfig`` (#5639), so a key
+    such as ``parallel_config.vae_patch_parallel_size`` is otherwise ignored
+    without notice. No key that pipelines read from ``additional_config``
+    matches a field of either config.
+    """
+    if not additional_config:
+        return
+    parallel_fields = _init_field_names(DiffusionParallelConfig)
+    top_level_fields = (_init_field_names(OmniDiffusionConfig) | parallel_fields) - {
+        "additional_config",
+        "parallel_config",
+    }
+    ignored = [(key, key) for key in additional_config if key in top_level_fields]
+    nested_parallel = additional_config.get("parallel_config")
+    if isinstance(nested_parallel, Mapping):
+        ignored.extend((f"parallel_config.{key}", key) for key in nested_parallel if key in parallel_fields)
+    if not ignored:
+        return
+    hints = [
+        f"{path} (use {_DIFFUSION_FIELD_CLI_FLAGS[name]})"
+        if name in _DIFFUSION_FIELD_CLI_FLAGS
+        else f"{path} (use its Omni engine option or --deploy-config)"
+        for path, name in ignored
+    ]
+    logger.warning_once(
+        "additional_config sets Omni diffusion config field(s) %s. These values are ignored for Omni: "
+        "additional_config is forwarded to the platform plugin and model-specific options and does not override "
+        "OmniDiffusionConfig or DiffusionParallelConfig.",
+        ", ".join(hints),
+    )
+
+
 def build_diffusion_config(
     model: str,
     stage_cfg: Any,
@@ -2104,6 +2167,7 @@ def build_diffusion_config(
         include_engine_adapter_metadata=True,
     )
     od_config = OmniDiffusionConfig(**{name: value for name, value in diffusion_kwargs.items() if value is not None})
+    warn_ignored_diffusion_additional_config(od_config.additional_config)
 
     for dimension in ("height", "width"):
         value = getattr(metadata.default_sampling_params, dimension, None)

@@ -105,6 +105,11 @@ vllm serve Tongyi-MAI/Z-Image-Turbo --omni --port 8091 \
     --vae-use-tiling
 ```
 
+!!! note
+    `--additional-config` is forwarded to the platform plugin and model-specific
+    options and does not set these fields: `--additional-config '{"parallel_config": {"vae_patch_parallel_size": 2}}'`
+    is ignored for Omni and logs a warning. Use the dedicated flags above.
+
 ---
 
 ## Configuration Parameters
