@@ -14,6 +14,7 @@ substitutable with the base class — including base-style calls that pass
 
 import inspect
 
+import msgspec
 import numpy as np
 import pytest
 import torch
@@ -144,3 +145,61 @@ def test_kv_hints_survive_omni_upgrade_wire_transport_and_scheduler_conversion()
     assert decoded.session_id == "session"
     assert scheduled.kv_hints == hints
     assert scheduled.session_id == "session"
+
+
+# vllm_omni/patch.py rebinds ``vllm.v1.engine.EngineCoreRequest`` to the Omni
+# subclass, so take the unpatched upstream class from the subclass's base.
+_UPSTREAM_ENGINE_CORE_REQUEST = OmniEngineCoreRequest.__bases__[0]
+
+# ``from_request`` keyword overrides; a passed value replaces the source field.
+_FROM_REQUEST_OVERRIDES = (
+    "prompt_embeds",
+    "additional_information",
+    "model_intermediate_buffer",
+    "payload_sender_info",
+)
+
+
+class _FieldSentinel:
+    """Unique per-field marker; msgspec Struct construction does not type-check."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __repr__(self) -> str:
+        return f"<sentinel {self.name}>"
+
+
+def _dropped_fields(source, result, skip=()) -> list[str]:
+    return [
+        f.name
+        for f in msgspec.structs.fields(type(source))
+        if f.name not in skip and getattr(result, f.name, None) is not getattr(source, f.name)
+    ]
+
+
+@pytest.mark.parametrize("source_cls", [_UPSTREAM_ENGINE_CORE_REQUEST, OmniEngineCoreRequest], ids=["upstream", "omni"])
+def test_from_request_preserves_every_struct_field(source_cls):
+    """Guard against vLLM adding an ``EngineCoreRequest`` field that ``from_request`` drops (#4015).
+
+    Every field gets a distinct sentinel, so a new field with a default is
+    still caught. Fix a failure by copying the named field in
+    ``OmniEngineCoreRequest.from_request``.
+    """
+    assert _UPSTREAM_ENGINE_CORE_REQUEST.__module__ == "vllm.v1.engine"
+    field_names = [f.name for f in msgspec.structs.fields(source_cls)]
+    source = source_cls(**{name: _FieldSentinel(name) for name in field_names})
+
+    upgraded = OmniEngineCoreRequest.from_request(source)
+
+    assert type(upgraded) is OmniEngineCoreRequest
+    dropped = _dropped_fields(source, upgraded)
+    assert not dropped, f"OmniEngineCoreRequest.from_request drops {source_cls.__name__} fields: {dropped}"
+
+    overrides = {name: _FieldSentinel(f"override-{name}") for name in _FROM_REQUEST_OVERRIDES}
+    overridden = OmniEngineCoreRequest.from_request(source, **overrides)
+
+    for name, value in overrides.items():
+        assert getattr(overridden, name) is value, name
+    dropped = _dropped_fields(source, overridden, skip=_FROM_REQUEST_OVERRIDES)
+    assert not dropped, f"OmniEngineCoreRequest.from_request drops {source_cls.__name__} fields: {dropped}"
