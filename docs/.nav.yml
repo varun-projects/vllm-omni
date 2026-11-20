@@ -129,6 +129,29 @@ nav:
     - contributing/README.md
     - glob: contributing/*
       flatten_single_child_sections: true
+  - Code Introduction:
+    - Overview: intro/README.md
+    - Project Overview: intro/01-project-overview.md
+    - Architecture in Detail: intro/02-architecture.md
+    - Request Lifecycle: intro/03-request-lifecycle.md
+    - Feature Deep Dives:
+      - Overview: intro/features/README.md
+      - Stage Runtime and Orchestrator: intro/features/01-stage-runtime-and-orchestrator.md
+      - AR Stage Scheduling: intro/features/02-ar-stage-scheduling.md
+      - Diffusion Stage Execution: intro/features/03-diffusion-stage.md
+      - OmniConnector Transport: intro/features/04-omni-connector-transport.md
+      - Full-Duplex Sessions: intro/features/05-full-duplex-sessions.md
+      - Prefix Caching and KV Reuse: intro/features/06-prefix-caching-and-kv.md
+      - Distributed Parallelism: intro/features/07-distributed-parallelism.md
+      - Entrypoints and APIs: intro/features/08-entrypoints-and-apis.md
+    - Debugging Case Studies:
+      - Overview: intro/case-studies/README.md
+      - Mixed-Length Batch RoPE: intro/case-studies/01-qwen-image-21-mixed-batch-rope.md
+      - AR-to-DiT Token Identity: intro/case-studies/02-hunyuanimage3-ar-token-identity.md
+      - Duplex Idle Lease: intro/case-studies/03-duplex-idle-lease.md
+      - Diffusion Worker Orphans: intro/case-studies/04-diffusion-worker-orphans.md
+      - MRv2 Capture Contract: intro/case-studies/05-cosyvoice3-dspark-capture-contract.md
+      - Guidance Scale Default: intro/case-studies/06-sdxl-guidance-scale-default.md
   - Model Implementation:
     - contributing/model/README.md
     - contributing/model/adding_omni_model.md
